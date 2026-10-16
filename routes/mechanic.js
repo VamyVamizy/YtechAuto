@@ -48,11 +48,16 @@ async function emailCompletedTicket(db, ticketId, request, pdfBuffer) {
 
     const configuredBaseUrl = process.env.APP_URL || process.env.BASE_URL;
     const requestBaseUrl = request ? `${request.protocol}://${request.get('host')}` : '';
-    const customerUrl = new URL(`/customer?ticketId=${encodeURIComponent(ticket.id)}`, configuredBaseUrl || requestBaseUrl).toString();
+    const baseUrl = configuredBaseUrl || requestBaseUrl;
+    const returnTo = `/customer?ticketId=${encodeURIComponent(ticket.id)}`;
+    const customerUrl = new URL('/loginPage', baseUrl);
+    customerUrl.searchParams.set('returnTo', returnTo);
+    const signupUrl = new URL('/signup', baseUrl);
+    signupUrl.searchParams.set('returnTo', returnTo);
     await sendMail(
         ticket.customerEmail,
         `Completed repair ticket`,
-        `<p>Your Automotive repair ticket is complete. The customer version is attached as a PDF.</p><p>You can also <a href="${escapeHtml(customerUrl)}">view your completed customer ticket online</a>.</p><p>This is from the Auto Repair Ticket System of the York County School of Technology.</p>`,
+        `<p>Your Automotive repair ticket is complete. The customer version is attached as a PDF.</p><p><a href="${escapeHtml(customerUrl.toString())}">Sign in with your local account to view your completed customer ticket online</a>.</p><p>If you don't have an account yet, <a href="${escapeHtml(signupUrl.toString())}">sign up for a local account</a> first.</p><p>This is from the Auto Repair Ticket System of the York County School of Technology.</p>`,
         [{ filename: `customer-ticket-${ticket.id}.pdf`, content: pdfBuffer, contentType: 'application/pdf' }]
     );
 }

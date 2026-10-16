@@ -13,14 +13,19 @@ function isValidEmail(email) {
     return emailRegex.test(String(email).toLowerCase().trim());
 }
 
+function getCustomerReturnTo(value) {
+    return typeof value === 'string' && /^\/customer(?:[/?#]|$)/.test(value) ? value : '';
+}
+
 // Local login route for testing without Azure AD
 
 router.get("/signup", (req, res) => {
-    res.render("signup");
+    res.render("signup", { returnTo: getCustomerReturnTo(req.query.returnTo) });
 });
 
 router.post("/signup", (req, res) => {
     const { email, password } = req.body || {};
+    const returnTo = getCustomerReturnTo(req.body && req.body.returnTo);
     const role = isAdmin(email) ? 'admin' : 'customer';
     const db = req.app.locals.db;
 
@@ -50,14 +55,13 @@ router.post("/signup", (req, res) => {
             console.error('Database error during signup:', err);
             return res.status(500).send('Internal Server Error');
         }
-        res.redirect('/loginPage');
+        const loginUrl = returnTo ? `/loginPage?returnTo=${encodeURIComponent(returnTo)}` : '/loginPage';
+        res.redirect(loginUrl);
     });
 });
 
 router.get("/loginPage", (req, res) => {
-    const returnTo = typeof req.query.returnTo === 'string' && /^\/customer(?:[/?#]|$)/.test(req.query.returnTo)
-        ? req.query.returnTo
-        : '';
+    const returnTo = getCustomerReturnTo(req.query.returnTo);
     res.render("loginPage", { returnTo });
 });
 
@@ -128,9 +132,7 @@ router.post("/loginPage", (req, res) => {
         }
 
         req.session.user = { id: userId, email, stat: role, authMethod: 'local' };
-        const returnTo = typeof req.body.returnTo === 'string' && /^\/customer(?:[/?#]|$)/.test(req.body.returnTo)
-            ? req.body.returnTo
-            : '';
+        const returnTo = getCustomerReturnTo(req.body.returnTo);
         return res.redirect(returnTo || '/');
     });
 });

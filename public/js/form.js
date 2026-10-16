@@ -2383,6 +2383,7 @@ document.addEventListener('DOMContentLoaded', function () {
       if (!customerMain) throw new Error('Customer page content was not found');
 
       const target = customerMain.cloneNode(true);
+      target.querySelectorAll('.video-section').forEach(section => section.remove());
       renderContainer.appendChild(target);
       await Promise.all(Array.from(target.querySelectorAll('img')).map(image => image.complete
         ? Promise.resolve()
