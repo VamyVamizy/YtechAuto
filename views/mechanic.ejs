@@ -46,7 +46,9 @@
         <div class="form-grid">
           <div class="form-group">
             <label for="roNum">Repair Order or Task Number #</label>
-            <input type="text" name="roNum" id="roNum" placeholder="Enter RO number">
+            <input type="text" name="roNum" id="roNum"
+              value="<%= (typeof ticket !== 'undefined' && ticket && ticket.repairOrderNumber) || (typeof nextRepairOrderNumber !== 'undefined' ? nextRepairOrderNumber : '') %>"
+              placeholder="Repair order number" readonly>
           </div>
           <div class="form-group">
             <label for="roDate">Date</label>
