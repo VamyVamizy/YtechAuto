@@ -1047,14 +1047,30 @@ document.addEventListener('DOMContentLoaded', function () {
 
     const ctx = canvas.getContext('2d');
     let isDrawing = false;
+    let shiftHeld = false;
+    let pointerInside = false;
     let lastX = 0, lastY = 0;
     ctx.strokeStyle = '#000';
     ctx.lineWidth = 2;
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
 
+    function finishStroke() {
+      if (!isDrawing) return;
+      isDrawing = false;
+      try { signatureData.value = canvas.toDataURL('image/png'); } catch (err) { }
+    }
+
+    canvas.addEventListener('pointerenter', function () {
+      pointerInside = true;
+    });
+    canvas.addEventListener('pointerleave', function () {
+      pointerInside = false;
+      finishStroke();
+    });
     canvas.addEventListener('pointerdown', function (e) {
-      canvas.setPointerCapture(e.pointerId);
+      if (e.button !== 0) return;
+      pointerInside = true;
       isDrawing = true;
       const rect = canvas.getBoundingClientRect();
       lastX = e.clientX - rect.left;
@@ -1063,23 +1079,33 @@ document.addEventListener('DOMContentLoaded', function () {
       ctx.moveTo(lastX, lastY);
     });
     canvas.addEventListener('pointermove', function (e) {
-      if (!isDrawing) return;
+      if ((!isDrawing && !shiftHeld) || !pointerInside) return;
       const rect = canvas.getBoundingClientRect();
       const x = e.clientX - rect.left;
       const y = e.clientY - rect.top;
+      if (!isDrawing) {
+        isDrawing = true;
+        lastX = x;
+        lastY = y;
+        ctx.beginPath();
+        ctx.moveTo(lastX, lastY);
+        return;
+      }
       ctx.lineTo(x, y);
       ctx.stroke();
       lastX = x; lastY = y;
     });
-    function endDraw(e) {
-      if (!isDrawing) return;
-      isDrawing = false;
-      try { canvas.releasePointerCapture && canvas.releasePointerCapture(e.pointerId); } catch (err) { }
-      try { signatureData.value = canvas.toDataURL('image/png'); } catch (err) { }
-    }
-    canvas.addEventListener('pointerup', endDraw);
-    canvas.addEventListener('pointercancel', endDraw);
-    canvas.addEventListener('pointerout', endDraw);
+    canvas.addEventListener('pointerup', finishStroke);
+    canvas.addEventListener('pointercancel', finishStroke);
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Shift') shiftHeld = true;
+    });
+    document.addEventListener('keyup', function (e) {
+      if (e.key === 'Shift') {
+        shiftHeld = false;
+        finishStroke();
+      }
+    });
 
     if (clearBtn) {
       clearBtn.addEventListener('click', function () {
@@ -1116,6 +1142,9 @@ document.addEventListener('DOMContentLoaded', function () {
 
     function showErrors(errors) {
       if (!errors || errors.length === 0) return;
+      if (window.__lastSaveButton && typeof window.finishSaveButton === 'function') {
+        window.finishSaveButton(window.__lastSaveButton, false);
+      }
       const completeButton = document.getElementById('completeTicketBottom');
       if (completeButton) completeButton.disabled = false;
       // Reset ticket status so that subsequent "Save Ticket" clicks only validate core fields
@@ -1180,7 +1209,7 @@ document.addEventListener('DOMContentLoaded', function () {
         (signatureIdEl && signatureIdEl.value && String(signatureIdEl.value).trim() !== '') ||
         !!signatureImg;
 
-      if (!hasSignature) {
+      if (tryingToCompleteTop && !hasSignature) {
         errors.push('Customer signature is required.');
         markInvalid(document.getElementById('signatureCanvas') || document.querySelector('.signature-container'));
       }
@@ -1440,6 +1469,8 @@ document.addEventListener('DOMContentLoaded', function () {
       try {
         const formData = new FormData(form);
         const ticketId = form.querySelector('[name="ticketId"]')?.value;
+        const saveController = new AbortController();
+        const saveTimeout = window.setTimeout(() => saveController.abort(), 30000);
 
         // If completing, generate and attach PDF
         if (tryingToComplete && typeof window.generatePagePdf === 'function') {
@@ -1455,8 +1486,10 @@ document.addEventListener('DOMContentLoaded', function () {
 
         const response = await fetch(form.action || '/mechanic', {
           method: 'POST',
-          body: formData
+          body: formData,
+          signal: saveController.signal
         });
+        window.clearTimeout(saveTimeout);
 
         if (response.status === 409) {
           // Conflict: duplicate ticket number
@@ -1471,11 +1504,25 @@ document.addEventListener('DOMContentLoaded', function () {
         }
 
         // Success: redirect
+        if (window.__lastSaveButton && typeof window.finishSaveButton === 'function') {
+          window.finishSaveButton(window.__lastSaveButton, true);
+        }
+        try {
+          if (window.__lastSaveButton && window.__lastSaveButton.id === 'firstSub') {
+            sessionStorage.setItem('mechanic-main-save-success', '1');
+          }
+        } catch (storageErr) { console.warn('Could not preserve save state:', storageErr); }
         const redirectUrl = response.url || `/mechanic?id=${encodeURIComponent(ticketId || '')}`;
         window.location.assign(redirectUrl);
       } catch (err) {
         console.error('Ticket submission failed:', err);
-        showErrors([err.message || 'Failed to save ticket. Please try again.']);
+        if (window.__lastSaveButton && typeof window.finishSaveButton === 'function') {
+          window.finishSaveButton(window.__lastSaveButton, false);
+        }
+        const message = err.name === 'AbortError'
+          ? 'The save took too long and was cancelled. Please try again.'
+          : (err.message || 'Failed to save ticket. Please try again.');
+        showErrors([message]);
         return false;
       }
       return true;
@@ -2563,6 +2610,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
         if (!ticketId) {
           console.error('Cannot save courtesy check: missing ticket id. Save Repair Order first.');
+          window.finishSaveButton(saveBtn, false);
           return;
         }
 
@@ -2591,6 +2639,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
           if (res.status === 204) {
             console.log('Courtesy check saved (204)');
+            window.finishSaveButton(saveBtn, true);
             return;
           }
 
@@ -2599,17 +2648,21 @@ document.addEventListener('DOMContentLoaded', function () {
             try { payload = await res.json(); } catch (e) { payload = null; }
             if (payload && payload.success) {
               console.log('Courtesy check saved');
+              window.finishSaveButton(saveBtn, true);
               return;
             }
             console.warn('Courtesy check save response', res.status, payload);
+            window.finishSaveButton(saveBtn, false);
             return;
           }
 
           let errPayload = null;
           try { errPayload = await res.json(); } catch (err) { errPayload = null; }
           console.error('Courtesy check save failed', res.status, errPayload);
+          window.finishSaveButton(saveBtn, false);
         } catch (err) {
           console.error('Courtesy check save failed', err);
+          window.finishSaveButton(saveBtn, false);
         }
       });
     } catch (err) {
@@ -2638,6 +2691,7 @@ document.addEventListener('DOMContentLoaded', function () {
         const ticketId = (window.__SERVER_TICKET__ && window.__SERVER_TICKET__.id) || document.getElementById('vehicle-ticketId')?.value || document.getElementById('ticketId')?.value || '';
         if (!ticketId) {
           console.error('Cannot save steering-suspension: missing ticket id. Save Repair Order first.');
+          window.finishSaveButton(saveBtn, false);
           return;
         }
 
@@ -2690,6 +2744,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
           if (res.status === 204) {
             console.log('Steering & Suspension saved (204)');
+            window.finishSaveButton(saveBtn, true);
             return;
           }
 
@@ -2698,17 +2753,21 @@ document.addEventListener('DOMContentLoaded', function () {
             try { payload = await res.json(); } catch (e) { payload = null; }
             if (payload && payload.success) {
               console.log('Steering & Suspension saved');
+              window.finishSaveButton(saveBtn, true);
               return;
             }
             console.warn('Steering save response', res.status, payload);
+            window.finishSaveButton(saveBtn, false);
             return;
           }
 
           let errPayload = null;
           try { errPayload = await res.json(); } catch (err) { errPayload = null; }
           console.error('Steering save failed', res.status, errPayload);
+          window.finishSaveButton(saveBtn, false);
         } catch (err) {
           console.error('Steering save failed', err);
+          window.finishSaveButton(saveBtn, false);
         }
       });
     } catch (err) {
@@ -2736,6 +2795,7 @@ document.addEventListener('DOMContentLoaded', function () {
         const ticketId = (window.__SERVER_TICKET__ && window.__SERVER_TICKET__.id) || document.getElementById('vehicle-ticketId')?.value || document.getElementById('ticketId')?.value || '';
         if (!ticketId) {
           console.error('Cannot save brakes: missing ticket id. Save Repair Order first.');
+          window.finishSaveButton(saveBtn, false);
           return;
         }
 
@@ -2784,16 +2844,18 @@ document.addEventListener('DOMContentLoaded', function () {
             body: JSON.stringify({ ticketId, items, comments: parentComments })
           });
 
-          if (res.status === 204) { console.log('Brakes saved (204)'); return; }
+          if (res.status === 204) { console.log('Brakes saved (204)'); window.finishSaveButton(saveBtn, true); return; }
           if (res.ok) {
             let payload = null; try { payload = await res.json(); } catch (e) { payload = null; }
-            if (payload && payload.success) { console.log('Brakes saved'); return; }
-            console.warn('Brakes save response', res.status, payload); return;
+            if (payload && payload.success) { console.log('Brakes saved'); window.finishSaveButton(saveBtn, true); return; }
+            console.warn('Brakes save response', res.status, payload); window.finishSaveButton(saveBtn, false); return;
           }
           let errPayload = null; try { errPayload = await res.json(); } catch (e) { errPayload = null; }
           console.error('Brakes save failed', res.status, errPayload);
+          window.finishSaveButton(saveBtn, false);
         } catch (err) {
           console.error('Brakes save failed', err);
+          window.finishSaveButton(saveBtn, false);
         }
       });
     } catch (err) {
@@ -2818,7 +2880,7 @@ document.addEventListener('DOMContentLoaded', function () {
       saveBtn.addEventListener('click', async function (e) {
         e.preventDefault(); e.stopPropagation();
         const ticketId = (window.__SERVER_TICKET__ && window.__SERVER_TICKET__.id) || document.getElementById('vehicle-ticketId')?.value || document.getElementById('ticketId')?.value || '';
-        if (!ticketId) { console.error('Cannot save emissions: missing ticket id. Save Repair Order first.'); return; }
+        if (!ticketId) { console.error('Cannot save emissions: missing ticket id. Save Repair Order first.'); window.finishSaveButton(saveBtn, false); return; }
 
         // collect table rows
         const table = emissionsSection.querySelector('table');
@@ -2878,16 +2940,18 @@ document.addEventListener('DOMContentLoaded', function () {
           const res = await fetch('/mechanic/emissions', {
             method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
           });
-          if (res.status === 204) { console.log('Emissions saved (204)'); return; }
+          if (res.status === 204) { console.log('Emissions saved (204)'); window.finishSaveButton(saveBtn, true); return; }
           if (res.ok) {
             let p = null; try { p = await res.json(); } catch (e) { p = null; }
-            if (p && p.success) { console.log('Emissions saved'); return; }
-            console.warn('Emissions save unexpected ok response', res.status, p); return;
+            if (p && p.success) { console.log('Emissions saved'); window.finishSaveButton(saveBtn, true); return; }
+            console.warn('Emissions save unexpected ok response', res.status, p); window.finishSaveButton(saveBtn, false); return;
           }
           let err = null; try { err = await res.json(); } catch (e) { err = null; }
           console.error('Emissions save failed', res.status, err);
+          window.finishSaveButton(saveBtn, false);
         } catch (err) {
           console.error('Emissions save failed', err);
+          window.finishSaveButton(saveBtn, false);
         }
       });
     } catch (err) { console.warn('wireEmissionsSave error', err); }
@@ -2897,7 +2961,8 @@ document.addEventListener('DOMContentLoaded', function () {
 
 // --- Vehicle Info: force AJAX submit to /mechanic/vehicle-info to avoid interfering with main ticket submit ---
 (function wireVehicleInfoForm() {
-  try {
+  const bind = function () {
+    try {
     const vForm = document.getElementById('vehicle-info-form');
     if (!vForm) return;
     vForm.addEventListener('submit', async function (e) {
@@ -2912,6 +2977,7 @@ document.addEventListener('DOMContentLoaded', function () {
       // ensure there's a ticket id
       if (!obj.ticketId && !obj.ticketID && !obj.id) {
         console.error('Cannot save vehicle info: missing ticket id. Save the Repair Order first.');
+        window.finishSaveButton(vForm.querySelector('.save-action'), false);
         return;
       }
 
@@ -2924,6 +2990,7 @@ document.addEventListener('DOMContentLoaded', function () {
         // accept 204 No Content as successful silent save
         if (res.status === 204) {
           console.log('Vehicle info saved (204)');
+          window.finishSaveButton(vForm.querySelector('.save-action'), true);
           return;
         }
         if (res.ok) {
@@ -2932,20 +2999,27 @@ document.addEventListener('DOMContentLoaded', function () {
           try { json = await res.json(); } catch (e) { json = null; }
           if (json && json.success) {
             console.log('Vehicle info saved', json);
+            window.finishSaveButton(vForm.querySelector('.save-action'), true);
             return;
           }
           console.error('Vehicle info save: unexpected OK response', res.status, json);
+          window.finishSaveButton(vForm.querySelector('.save-action'), false);
           return;
         }
         // non-OK: try to surface error message
         let errJson = null;
         try { errJson = await res.json(); } catch (e) { errJson = null; }
         console.error('Vehicle info save failed', res.status, errJson);
+        window.finishSaveButton(vForm.querySelector('.save-action'), false);
       } catch (err) {
         console.error('Vehicle info save failed', err);
+        window.finishSaveButton(vForm.querySelector('.save-action'), false);
       }
     }, { capture: true });
-  } catch (err) { console.warn('wireVehicleInfoForm error', err); }
+    } catch (err) { console.warn('wireVehicleInfoForm error', err); }
+  };
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bind);
+  else bind();
 })();
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -2965,6 +3039,7 @@ document.addEventListener('DOMContentLoaded', () => {
         } else {
           console.error('Tires save failed: missing ticketId');
           alert('Cannot save tires: ticketId missing.');
+          window.finishSaveButton(tiresForm.querySelector('.save-action'), false);
           return;
         }
       }
@@ -2993,6 +3068,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
         if (res.status === 204) {
           console.log('Tires saved (204).');
+          window.finishSaveButton(tiresForm.querySelector('.save-action'), true);
           return;
         }
         if (!res.ok) throw new Error(`Tires save failed: ${res.status}`);
@@ -3000,9 +3076,11 @@ document.addEventListener('DOMContentLoaded', () => {
         let json = null;
         try { json = await res.json(); } catch (e) { json = null; }
         console.log('Tires save response', res.status, json);
+        window.finishSaveButton(tiresForm.querySelector('.save-action'), true);
       } catch (err) {
         console.error(err);
         alert('Tires save failed. See console for details.');
+        window.finishSaveButton(tiresForm.querySelector('.save-action'), false);
       }
     }, { capture: true });
   }
@@ -3111,7 +3189,11 @@ document.addEventListener('DOMContentLoaded', () => {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ ticketId: String(ticketId) })
         });
-        if (!res.ok) { console.warn('loadSavedSignatureForTicket: server returned', res.status); return false; }
+        if (!res.ok) {
+          console.warn('loadSavedSignatureForTicket: server returned', res.status);
+          // A missing signature is a normal state for an unfinished ticket.
+          return res.status === 404 ? null : false;
+        }
         let json = null;
         try { json = await res.json(); } catch (e) { console.warn('loadSavedSignatureForTicket: failed to parse json', e); json = null; }
         if (!json || !json.success || !json.signature) {
@@ -3162,7 +3244,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const tryOnce = async () => {
         attempt += 1;
         const id = resolveTicketId();
-        if (!id) return false;
+        if (!id) return null;
         try {
           const ok = await loadSavedSignatureForTicket(id);
           if (ok) applied = true;
@@ -3171,12 +3253,18 @@ document.addEventListener('DOMContentLoaded', () => {
       };
 
       // immediate first try
-      if (await tryOnce()) return;
+      const firstAttempt = await tryOnce();
+      if (firstAttempt === true || firstAttempt === null) return;
 
       const iv = setInterval(async () => {
         if (attempt >= maxAttempts || applied) { clearInterval(iv); if (!applied) console.log('signature loader giving up after', attempt, 'attempts'); return; }
         try {
-          if (await tryOnce()) {
+          const result = await tryOnce();
+          if (result === null) {
+            clearInterval(iv);
+            return;
+          }
+          if (result === true) {
             clearInterval(iv);
             console.log('signature loader: applied on attempt', attempt);
           }
@@ -3187,4 +3275,144 @@ document.addEventListener('DOMContentLoaded', () => {
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', initSignatureLoader);
   else initSignatureLoader();
+})();
+
+// Keep lower inspection fields visible when the main ticket save redirects back to the ticket.
+(function preserveInspectionDraft() {
+  const storageKey = 'mechanic-inspection-draft';
+  const sectionIds = ['vehicle-info', 'courtesy-check', 'tires', 'steering', 'brakes', 'emissions'];
+
+  function getDraftKey() {
+    const ticketId = window.__SERVER_TICKET__ && window.__SERVER_TICKET__.id;
+    return ticketId ? `${storageKey}-${ticketId}` : `${storageKey}-new`;
+  }
+
+  function captureDraft() {
+    const values = {};
+    sectionIds.forEach((sectionId) => {
+      const section = document.getElementById(sectionId);
+      if (!section) return;
+      section.querySelectorAll('input, select, textarea').forEach((control, index) => {
+        if (control.type === 'hidden' || control.type === 'file') return;
+        values[`${sectionId}-${index}`] = control.type === 'checkbox' ? control.checked : control.value;
+      });
+    });
+    try { sessionStorage.setItem(getDraftKey(), JSON.stringify(values)); } catch (err) { console.warn('Could not preserve inspection draft', err); }
+  }
+
+  function restoreDraft() {
+    let values = null;
+    try {
+      values = JSON.parse(sessionStorage.getItem(getDraftKey()) || 'null');
+      if (!values && window.__SERVER_TICKET__?.id) {
+        values = JSON.parse(sessionStorage.getItem(`${storageKey}-new`) || 'null');
+        if (values) sessionStorage.removeItem(`${storageKey}-new`);
+      }
+    } catch (err) { return; }
+    if (!values) return;
+    sectionIds.forEach((sectionId) => {
+      const section = document.getElementById(sectionId);
+      if (!section) return;
+      section.querySelectorAll('input, select, textarea').forEach((control, index) => {
+        const key = `${sectionId}-${index}`;
+        if (!Object.prototype.hasOwnProperty.call(values, key)) return;
+        if (control.type === 'checkbox') control.checked = values[key];
+        else control.value = values[key];
+      });
+    });
+  }
+
+  function restoreMainSaveState() {
+    let wasSaved = false;
+    try {
+      wasSaved = sessionStorage.getItem('mechanic-main-save-success') === '1';
+      if (wasSaved) sessionStorage.removeItem('mechanic-main-save-success');
+    } catch (err) { return; }
+    if (wasSaved) window.finishSaveButton(document.getElementById('firstSub'), true);
+  }
+
+  document.addEventListener('DOMContentLoaded', restoreDraft);
+  document.addEventListener('DOMContentLoaded', restoreMainSaveState);
+  window.finishSaveButton = function (button, succeeded) {
+    if (!button) return;
+    const originalText = button.dataset.originalText || button.textContent.trim().replace(/^Saving\.\.\.$/, 'Save');
+    let status = button.nextElementSibling;
+    if (!status || !status.classList.contains('save-status')) {
+      status = document.createElement('span');
+      status.className = 'save-status';
+      button.insertAdjacentElement('afterend', status);
+    }
+    button.classList.remove('save-clicked', 'save-success', 'save-failed');
+    button.textContent = originalText;
+    button.classList.add(succeeded ? 'save-success' : 'save-failed');
+    status.textContent = succeeded ? '\u2713 Saved' : 'Save failed';
+    status.classList.toggle('save-status-success', succeeded);
+    status.classList.toggle('save-status-failed', !succeeded);
+    button.disabled = false;
+  };
+  function validateInspectionSection(saveButton) {
+    const section = saveButton.closest('.accordion-content');
+    if (!section) return true;
+
+    const missing = [];
+    section.classList.remove('validation-section-error');
+    section.querySelectorAll('.validation-missing').forEach(element => element.classList.remove('validation-missing'));
+
+    section.querySelectorAll('input, select, textarea').forEach((control) => {
+      if (control.disabled || control.type === 'hidden' || control.type === 'file' || control.type === 'button' || control.type === 'submit' || control.readOnly) return;
+
+      const name = (control.name || '').toLowerCase();
+      const id = (control.id || '').toLowerCase();
+      const placeholder = (control.getAttribute('placeholder') || '').toLowerCase();
+      const group = control.closest('.form-group');
+      const label = (group?.querySelector('label')?.textContent || '').trim();
+      const labelLower = label.toLowerCase();
+
+      if (name.includes('comment') || name.includes('note') || id.includes('comment') || id.includes('note') ||
+        placeholder.includes('comment') || placeholder.includes('note') || labelLower.includes('comment') || labelLower.includes('note') ||
+        name.includes('warning') || id.includes('warning') || labelLower.includes('warning') || id.includes('tag') || name.includes('tag')) return;
+
+      if (!String(control.value || '').trim()) {
+        control.classList.add('validation-missing');
+        missing.push(label || control.name || control.id || 'Required field');
+        if (!control.dataset.validationClearAttached) {
+          const clearHighlight = () => control.classList.remove('validation-missing');
+          control.addEventListener('input', clearHighlight);
+          control.addEventListener('change', clearHighlight);
+          control.dataset.validationClearAttached = '1';
+        }
+      }
+    });
+
+    if (!missing.length) return true;
+    section.classList.add('validation-section-error');
+    alert(`Please complete the following fields before saving:\n\n${missing.join('\n')}`);
+    const firstMissing = section.querySelector('.validation-missing');
+    if (firstMissing) firstMissing.focus();
+    return false;
+  }
+
+  document.addEventListener('click', (event) => {
+    const saveButton = event.target.closest('.save-action');
+    if (!saveButton || !saveButton.closest('.accordion-content')) return;
+    if (!validateInspectionSection(saveButton)) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+  }, true);
+
+  document.addEventListener('click', (event) => {
+    const saveButton = event.target.closest('.save-action');
+    if (!saveButton) return;
+    saveButton.classList.add('save-clicked');
+    saveButton.classList.remove('save-success');
+    saveButton.classList.remove('save-failed');
+    saveButton.dataset.originalText = saveButton.dataset.originalText || saveButton.textContent.trim();
+    const status = saveButton.nextElementSibling;
+    if (status && status.classList.contains('save-status')) status.textContent = '';
+    saveButton.textContent = 'Saving...';
+    if (saveButton.type !== 'submit') saveButton.disabled = true;
+    window.__lastSaveButton = saveButton;
+    if (saveButton.form && saveButton.form.id === 'repForm') captureDraft();
+  });
 })();
